@@ -37,3 +37,12 @@ Put these files in `data/raw/`:
 ### 1) Configure environment
 ```bash
 cp .env.example .env
+
+## Demo (2 minutes)
+1) `docker compose up -d --build`
+2) Open Dagster: http://localhost:3000 → run `etl_job`
+3) Open API docs: http://localhost:8000/docs
+4) Try:
+   - `/programs?limit=3`
+   - `/search?query=interview&limit=3`
+
