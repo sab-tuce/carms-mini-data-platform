@@ -1,0 +1,6 @@
+dagster==1.8.7
+dagster-webserver==1.8.7
+pandas==2.2.3
+openpyxl==3.1.5
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1

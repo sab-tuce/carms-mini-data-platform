@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: carms_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-carms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-carms}
+      POSTGRES_DB: ${POSTGRES_DB:-carms}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-carms} -d ${POSTGRES_DB:-carms}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: carms_api
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-carms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-carms}
+      POSTGRES_DB: ${POSTGRES_DB:-carms}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dagster_webserver:
+    build:
+      context: .
+      dockerfile: dagster_app/Dockerfile
+    container_name: carms_dagster_web
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      POSTGRES_USER: ${POSTGRES_USER:-carms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-carms}
+      POSTGRES_DB: ${POSTGRES_DB:-carms}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    volumes:
+      - dagster_home:/opt/dagster/dagster_home
+      - ./dagster_app:/app/dagster_app
+      - ./data:/app/data
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["dagster-webserver", "-m", "dagster_app.definitions", "-h", "0.0.0.0", "-p", "3000"]
+
+  dagster_daemon:
+    build:
+      context: .
+      dockerfile: dagster_app/Dockerfile
+    container_name: carms_dagster_daemon
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      POSTGRES_USER: ${POSTGRES_USER:-carms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-carms}
+      POSTGRES_DB: ${POSTGRES_DB:-carms}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    volumes:
+      - dagster_home:/opt/dagster/dagster_home
+      - ./dagster_app:/app/dagster_app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["dagster-daemon", "run", "-m", "dagster_app.definitions"]
+
+volumes:
+  pgdata:
+  dagster_home:
