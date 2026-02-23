@@ -1,15 +1,23 @@
 # CaRMS Mini Data Platform
 
-A small, containerized **ETL + API** platform built with **PostgreSQL + Dagster + FastAPI**.  
-It ingests CaRMS program description data (match iteration **1503**) and exposes query/search endpoints.
+A small, dockerized **ETL + API** project built with **PostgreSQL + Dagster + FastAPI** using the CaRMS program description dataset (iteration **1503**).
 
-## Why this exists
-This project demonstrates that I can:
-- Stand up a reproducible data platform using Docker Compose
-- Model structured + text-heavy data in PostgreSQL
-- Orchestrate ETL with Dagster (logs, reruns, failure visibility)
-- Serve internal-style APIs with FastAPI (Swagger UI)
-- Implement basic PostgreSQL full-text search over extracted sections
+## What this project includes
+- A reproducible local stack via Docker Compose (Postgres + Dagster + FastAPI)
+- ETL implemented in Dagster as an **assets graph** (read → extract id → join → prepare → load)
+- FastAPI endpoints for listing programs and running keyword search (Swagger UI)
+
+## Screenshots
+
+### Dagster (ETL as assets)
+![Dagster assets graph](docs/images/dagster-assets-graph.png)
+![Dagster run success](docs/images/dagster-run-success.png)
+
+### FastAPI (Swagger)
+![Swagger endpoints](docs/images/swagger-endpoints.png)
+![Search parameters](docs/images/swagger-search-params.png)
+![Search response](docs/images/swagger-search-response.png)
+
 
 ## Architecture
 Services (Docker Compose):
@@ -21,10 +29,10 @@ Services (Docker Compose):
 High level flow:
 1) Place raw files in `data/raw/`
 2) Start the stack (`docker compose up -d --build`)
-3) Run Dagster job `etl_job` to load data into Postgres
+3) Materialize the ETL assets (via `etl_assets_job`) to load data into Postgres
 4) Query/search via FastAPI endpoints
 
-## Data inputs (not committed to git)
+## Data inputs 
 Put these files in `data/raw/`:
 - `1503_discipline.xlsx`
 - `1503_program_master.xlsx`
@@ -51,7 +59,7 @@ Open:
 
 ### 3) Run ETL
 In Dagster UI:
-**Jobs → etl_job → Run**
+**Jobs → etl_assets_job → Run**
 
 Expected row counts after a successful run:
 - `disciplines`: 37
@@ -60,50 +68,12 @@ Expected row counts after a successful run:
 - `program_descriptions`: 815
 - `program_description_sections`: ~9,000+
 
-## Demo (2 minutes)
+## Demo
 1) `docker compose up -d --build`
-2) Open Dagster UI → run `etl_job`
+2) Open Dagster UI → run `etl_assets_job`
 3) Open API docs: http://localhost:8000/docs
 4) Try:
    - `GET /programs?limit=3`
    - `GET /search?query=interview&limit=3`
 
-## API (MVP)
 
-### Health
-```bash
-curl -s http://localhost:8000/health
-```
-
-### Disciplines
-```bash
-curl -s http://localhost:8000/disciplines | head
-```
-
-### Programs (list + filters)
-```bash
-curl -s "http://localhost:8000/programs?limit=3"
-curl -s "http://localhost:8000/programs?discipline_id=1&limit=5"
-curl -s "http://localhost:8000/programs?q=Toronto&limit=5"
-```
-
-### Program detail (includes normalized sections)
-```bash
-curl -s "http://localhost:8000/programs/27447" | head
-```
-
-### Full-text search (PostgreSQL FTS)
-```bash
-curl -s "http://localhost:8000/search?query=interview&limit=3"
-
-## Screenshots
-
-### Dagster (ETL as assets)
-![Dagster assets graph](docs/images/dagster-assets-graph.png)
-![Dagster run success](docs/images/dagster-run-success.png)
-
-### FastAPI (Swagger)
-![Swagger endpoints](docs/images/swagger-endpoints.png)
-![Search parameters](docs/images/swagger-search-params.png)
-![Search response](docs/images/swagger-search-response.png)
-```
