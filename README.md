@@ -11,11 +11,17 @@ A small, dockerized **ETL + API** project built with **PostgreSQL + Dagster + Fa
 
 ### Dagster (ETL as assets)
 ![Dagster assets graph](docs/images/dagster-assets-graph.png)
+
+
 ![Dagster run success](docs/images/dagster-run-success.png)
 
 ### FastAPI (Swagger)
 ![Swagger endpoints](docs/images/swagger-endpoints.png)
+
+
 ![Search parameters](docs/images/swagger-search-params.png)
+
+
 ![Search response](docs/images/swagger-search-response.png)
 
 
