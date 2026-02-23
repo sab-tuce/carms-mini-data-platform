@@ -8,12 +8,19 @@ import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
-from dagster import job, op, get_dagster_logger
-
+from dagster import (
+    asset,
+    MaterializeResult,
+    MetadataValue,
+    define_asset_job,
+    AssetSelection,
+    get_dagster_logger,
+)
 
 RAW = Path("data/raw")
 
 
+# ---------- helpers ----------
 def _clean_text_series(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
@@ -26,7 +33,7 @@ def _clean_text_series(s: pd.Series) -> pd.Series:
 def extract_program_stream_id(x: pd.DataFrame) -> tuple[pd.Series, str]:
     """
     Prefer extracting program_stream_id from document_id (e.g. "1503-27447"),
-    fallback to source URL if document_id is not usable.
+    fallback to source URL if needed.
     Returns: (series_of_Int64, method_name)
     """
     # 1) document_id
@@ -50,6 +57,7 @@ def extract_program_stream_id(x: pd.DataFrame) -> tuple[pd.Series, str]:
 
 
 def get_conn():
+    # works both locally (reads .env) and in docker (env vars are injected)
     load_dotenv()
     user = os.getenv("POSTGRES_USER", "carms")
     password = os.getenv("POSTGRES_PASSWORD", "carms")
@@ -59,25 +67,35 @@ def get_conn():
     return psycopg2.connect(host=host, port=port, dbname=db, user=user, password=password)
 
 
-@op
-def etl_load_to_postgres():
-    log = get_dagster_logger()
-
-    # ---- read files
+# ---------- assets ----------
+@asset(group_name="etl", compute_kind="pandas")
+def disciplines_df() -> pd.DataFrame:
     d = pd.read_excel(RAW / "1503_discipline.xlsx")
-    m = pd.read_excel(RAW / "1503_program_master.xlsx")
-    x = pd.read_csv(RAW / "1503_program_descriptions_x_section.csv", low_memory=False)
+    return d
 
-    # ---- clean
+
+@asset(group_name="etl", compute_kind="pandas")
+def program_master_df() -> pd.DataFrame:
+    m = pd.read_excel(RAW / "1503_program_master.xlsx")
     if "Unnamed: 0" in m.columns:
         m = m.drop(columns=["Unnamed: 0"])
+    return m
+
+
+@asset(group_name="etl", compute_kind="pandas")
+def x_section_df() -> pd.DataFrame:
+    x = pd.read_csv(RAW / "1503_program_descriptions_x_section.csv", low_memory=False)
     if "Unnamed: 0" in x.columns:
         x = x.drop(columns=["Unnamed: 0"])
+    return x
 
-    expected = len(m)
 
-    # ---- robust join master + x_section via extracted program_stream_id
-    x = x.copy()
+@asset(group_name="etl", compute_kind="pandas")
+def x_section_with_id(x_section_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds program_stream_id_extracted based on document_id (preferred).
+    """
+    x = x_section_df.copy()
     x["program_stream_id_extracted"], method = extract_program_stream_id(x)
 
     bad = int(x["program_stream_id_extracted"].isna().sum())
@@ -86,6 +104,18 @@ def etl_load_to_postgres():
         sample = x.loc[x["program_stream_id_extracted"].isna(), cols].head(10)
         raise Exception(f"{method}: failed to extract program_stream_id for {bad}/{len(x)} rows.\n{sample}")
 
+    return x
+
+
+@asset(group_name="etl", compute_kind="pandas")
+def joined_master_xsection(program_master_df: pd.DataFrame, x_section_with_id: pd.DataFrame) -> pd.DataFrame:
+    """
+    Joins master and x_section via program_stream_id (stable identifier).
+    """
+    m = program_master_df
+    x = x_section_with_id
+
+    expected = len(m)
     uniq = int(x["program_stream_id_extracted"].nunique(dropna=True))
     if uniq != expected:
         raise Exception(f"Extracted ids not unique/complete: unique={uniq}, expected={expected}")
@@ -101,13 +131,28 @@ def etl_load_to_postgres():
     if len(merged) != expected:
         raise Exception(f"Join failed: expected {expected}, got {len(merged)}")
 
-    log.info(f"✅ Joined {len(merged)}/{expected} using method: {method}")
+    return merged
 
-    # ---- derive schools + disciplines
+
+@asset(group_name="etl", compute_kind="python")
+def prepared_payload(
+    disciplines_df: pd.DataFrame,
+    program_master_df: pd.DataFrame,
+    x_section_with_id: pd.DataFrame,
+    joined_master_xsection: pd.DataFrame,
+) -> dict:
+    """
+    Prepare all objects needed for loading into Postgres.
+    Returns a dict to keep downstream code simple.
+    """
+    d = disciplines_df
+    m = program_master_df
+    x = x_section_with_id
+    merged = joined_master_xsection
+
     schools = m[["school_id", "school_name"]].dropna().drop_duplicates()
     disciplines = d[["discipline_id", "discipline"]].dropna().drop_duplicates()
 
-    # ---- program_streams
     program_streams = m[
         [
             "program_stream_id",
@@ -124,14 +169,13 @@ def etl_load_to_postgres():
     ].copy()
     program_streams["match_iteration_id"] = 1503
 
-    # ---- program_descriptions (from merged)
-    # after merge, program_name is likely suffixed (program_name_m / program_name_x)
+    # program_name can be suffixed after merge; choose robustly
     if "program_name_x" in merged.columns:
         program_name_col = "program_name_x"
     elif "program_name_m" in merged.columns:
         program_name_col = "program_name_m"
     else:
-        program_name_col = "program_name"  # fallback (rare)
+        program_name_col = "program_name"
 
     program_desc = merged[
         [
@@ -146,15 +190,9 @@ def etl_load_to_postgres():
         ]
     ].copy()
 
-    program_desc = program_desc.rename(
-        columns={
-            "source": "source_url",
-            program_name_col: "program_name",
-        }
-    )
+    program_desc = program_desc.rename(columns={"source": "source_url", program_name_col: "program_name"})
 
-    # ---- sections (normalized)
-    # IMPORTANT: exclude program_stream_id_extracted from sections
+    # Sections (normalized) - IMPORTANT: exclude helper column
     meta_cols = {
         "document_id",
         "source",
@@ -180,18 +218,38 @@ def etl_load_to_postgres():
             if text:
                 section_rows.append((int(pdid), c, text))
 
+    return {
+        "disciplines": disciplines,
+        "schools": schools,
+        "program_streams": program_streams,
+        "program_desc": program_desc,
+        "section_rows": section_rows,
+    }
+
+
+@asset(group_name="etl", compute_kind="postgres")
+def load_postgres(prepared_payload: dict) -> MaterializeResult:
+    """
+    Loads all tables into Postgres (rerunnable: truncates then reloads).
+    """
+    log = get_dagster_logger()
+
+    disciplines = prepared_payload["disciplines"]
+    schools = prepared_payload["schools"]
+    program_streams = prepared_payload["program_streams"]
+    program_desc = prepared_payload["program_desc"]
+    section_rows = prepared_payload["section_rows"]
+
     log.info(
         f"Prepared: disciplines={len(disciplines)} schools={len(schools)} "
         f"program_streams={len(program_streams)} program_descriptions={len(program_desc)} "
         f"sections={len(section_rows)}"
     )
 
-    # ---- load to postgres
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
-            # Rerunnable ETL (MVP): wipe & reload
             cur.execute(
                 """
                 TRUNCATE program_description_sections,
@@ -269,15 +327,27 @@ def etl_load_to_postgres():
             )
 
         conn.commit()
-        log.info("✅ ETL finished and committed.")
+        log.info("✅ load_postgres committed successfully.")
     except Exception:
         conn.rollback()
-        log.error("❌ ETL failed, rolled back.")
+        log.error("❌ load_postgres failed, rolled back.")
         raise
     finally:
         conn.close()
 
+    return MaterializeResult(
+        metadata={
+            "disciplines": MetadataValue.int(len(disciplines)),
+            "schools": MetadataValue.int(len(schools)),
+            "program_streams": MetadataValue.int(len(program_streams)),
+            "program_descriptions": MetadataValue.int(len(program_desc)),
+            "sections": MetadataValue.int(len(section_rows)),
+        }
+    )
 
-@job
-def etl_job():
-    etl_load_to_postgres()
+
+# A job that materializes the whole ETL asset graph:
+etl_assets_job = define_asset_job(
+    name="etl_assets_job",
+    selection=AssetSelection.groups("etl"),
+)

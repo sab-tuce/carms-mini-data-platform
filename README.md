@@ -37,12 +37,73 @@ Put these files in `data/raw/`:
 ### 1) Configure environment
 ```bash
 cp .env.example .env
+```
+
+### 2) Start the platform
+```bash
+docker compose up -d --build
+docker ps
+```
+
+Open:
+- Dagster UI: http://localhost:3000
+- API Docs (Swagger): http://localhost:8000/docs
+
+### 3) Run ETL
+In Dagster UI:
+**Jobs → etl_job → Run**
+
+Expected row counts after a successful run:
+- `disciplines`: 37
+- `schools`: ~398
+- `program_streams`: 815
+- `program_descriptions`: 815
+- `program_description_sections`: ~9,000+
 
 ## Demo (2 minutes)
 1) `docker compose up -d --build`
-2) Open Dagster: http://localhost:3000 → run `etl_job`
+2) Open Dagster UI → run `etl_job`
 3) Open API docs: http://localhost:8000/docs
 4) Try:
-   - `/programs?limit=3`
-   - `/search?query=interview&limit=3`
+   - `GET /programs?limit=3`
+   - `GET /search?query=interview&limit=3`
 
+## API (MVP)
+
+### Health
+```bash
+curl -s http://localhost:8000/health
+```
+
+### Disciplines
+```bash
+curl -s http://localhost:8000/disciplines | head
+```
+
+### Programs (list + filters)
+```bash
+curl -s "http://localhost:8000/programs?limit=3"
+curl -s "http://localhost:8000/programs?discipline_id=1&limit=5"
+curl -s "http://localhost:8000/programs?q=Toronto&limit=5"
+```
+
+### Program detail (includes normalized sections)
+```bash
+curl -s "http://localhost:8000/programs/27447" | head
+```
+
+### Full-text search (PostgreSQL FTS)
+```bash
+curl -s "http://localhost:8000/search?query=interview&limit=3"
+
+## Screenshots
+
+### Dagster (ETL as assets)
+![Dagster assets graph](docs/images/dagster-assets-graph.png)
+![Dagster run success](docs/images/dagster-run-success.png)
+
+### FastAPI (Swagger)
+![Swagger endpoints](docs/images/swagger-endpoints.png)
+![Search parameters](docs/images/swagger-search-params.png)
+![Search response](docs/images/swagger-search-response.png)
+```
