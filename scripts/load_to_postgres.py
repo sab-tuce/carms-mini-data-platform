@@ -11,6 +11,43 @@ from dotenv import load_dotenv
 
 RAW = Path("data/raw")
 
+import re
+
+def _clean_text_series(s: pd.Series) -> pd.Series:
+    # normalize weird spaces/BOM, then strip
+    return (
+        s.astype(str)
+         .str.replace("\u00a0", " ", regex=False)  # NBSP
+         .str.replace("\ufeff", "", regex=False)   # BOM
+         .str.strip()
+    )
+
+def extract_program_stream_id(x: pd.DataFrame) -> tuple[pd.Series, str]:
+    """
+    Try to extract program_stream_id from document_id first (preferred),
+    fallback to source URL if needed.
+    Returns: (series_of_int_or_NA, method_name)
+    """
+    # 1) document_id (e.g. "1503-27447", "1503 - 27447", etc.)
+    if "document_id" in x.columns:
+        doc = _clean_text_series(x["document_id"])
+        # robust patterns: last digits or last part after '-'
+        m1 = doc.str.extract(r"(\d+)\s*$")[0]
+        m2 = doc.str.extract(r".*-\s*(\d+)\s*$")[0]
+        out = pd.to_numeric(m2.fillna(m1), errors="coerce").astype("Int64")
+        if out.notna().sum() >= max(1, int(0.95 * len(x))):
+            return out, "document_id"
+
+    # 2) source URL (e.g. ".../1503/27447?programLanguage=en")
+    if "source" in x.columns:
+        src = _clean_text_series(x["source"])
+        sid = src.str.extract(r"/\d+/(\d+)\b")[0]  # works for /1503/<id>
+        out = pd.to_numeric(sid, errors="coerce").astype("Int64")
+        if out.notna().sum() >= max(1, int(0.95 * len(x))):
+            return out, "source_url"
+
+    raise ValueError("Could not extract program_stream_id (no usable document_id or source).")
+
 def df_rows(df: pd.DataFrame):
     # convert pandas dtypes / <NA> to plain python types + None
     df2 = df.astype(object).where(pd.notna(df), None)
@@ -58,20 +95,47 @@ def main():
         if col in x.columns:
             x[col] = pd.to_numeric(x[col], errors="coerce").astype("Int64")
 
-    # ---- join master + x_section via URL
-    # master.program_url == x_section.source
+    # ---- robust join master + x_section via extracted program_stream_id
+    expected = len(m)
+
+    x = x.copy()
+    x["program_stream_id_extracted"], method = extract_program_stream_id(x)
+
+    bad = int(x["program_stream_id_extracted"].isna().sum())
+    if bad:
+        print(f"❌ {method}: failed to extract program_stream_id in {bad} rows out of {len(x)}")
+        # show a few examples
+        cols = [c for c in ["document_id", "source"] if c in x.columns]
+        print(x.loc[x["program_stream_id_extracted"].isna(), cols].head(10).to_string(index=False))
+        raise SystemExit(1)
+
+    # uniqueness check (important for stable join)
+    uniq = int(x["program_stream_id_extracted"].nunique(dropna=True))
+    if uniq != expected:
+        print(f"❌ Extracted ids are not unique/complete: unique={uniq}, expected={expected}")
+        dupes = x[x.duplicated("program_stream_id_extracted", keep=False)][["program_stream_id_extracted"]].head(20)
+        print("Sample duplicates:\n", dupes.to_string(index=False))
+        raise SystemExit(1)
+
+    # merge on ID (clean, stable)
     merged = m.merge(
         x,
-        left_on="program_url",
-        right_on="source",
+        left_on="program_stream_id",
+        right_on="program_stream_id_extracted",
         how="inner",
-        suffixes=("_m", "_x")
+        suffixes=("_m", "_x"),
     )
 
-    if len(merged) != 815:
-        print("❌ join did not return 815 rows.")
-        print("merged rows:", len(merged))
+    if len(merged) != expected:
+        print("❌ join did not return expected rows.")
+        print("expected:", expected, "merged:", len(merged))
+        # show missing ids if any
+        m_ids = set(pd.to_numeric(m["program_stream_id"], errors="coerce").dropna().astype(int).tolist())
+        x_ids = set(x["program_stream_id_extracted"].dropna().astype(int).tolist())
+        print("missing_in_x:", len(m_ids - x_ids), "extra_in_x:", len(x_ids - m_ids))
         raise SystemExit(1)
+
+    print(f"✅ Joined {len(merged)}/{expected} using method: {method}")
 
     # ---- derive schools table
     schools = m[["school_id", "school_name"]].dropna().drop_duplicates()
@@ -118,6 +182,7 @@ def main():
         "match_iteration_name",
         "match_iteration_id",
         "program_description_id",
+        "program_stream_id_extracted",
     }
     section_cols = [c for c in x.columns if c not in meta_cols]
 
