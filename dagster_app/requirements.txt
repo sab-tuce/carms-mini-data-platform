@@ -1,4 +1,4 @@
-dagster==1.8.7
+dagster==1.12.9
 dagster-webserver==1.8.7
 pandas==2.2.3
 openpyxl==3.1.5
